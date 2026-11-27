@@ -1,6 +1,6 @@
 /target/
-/music.key
-/wizards.key
+*.key
+/tooling/
 *.log
 .env
 .env.*

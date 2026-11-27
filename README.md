@@ -53,6 +53,9 @@ integration tests. Native `transport` builds require the same C++ toolchain as
 Discordia. This service and its bundle live here; Discordia retains installation,
 permissions, the gateway and trusted client audio reception.
 
+On Windows, keep the checkout/build path short for the native `transport`
+feature: legacy C++ tools can reject extracted SDK headers at 260 characters.
+
 ```powershell
 $env:LIVEKIT_BUNDLE_SKIP='1'  # Tests do not launch the bundled SFU.
 cargo fmt --all --check
