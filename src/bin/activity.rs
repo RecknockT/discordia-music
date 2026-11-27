@@ -15,28 +15,83 @@ use tokio::{
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Parser)]
-#[command(
-    about = "Run the optional Music Lab activity service. Shared queue prototype; audio is not connected."
-)]
+#[command(about = "Run optional Music Lab: public metadata queue and opt-in local audio.")]
 struct Args {
     #[arg(long, env = "SERVER_URL", default_value = "ws://127.0.0.1:9000")]
     server: String,
-    #[arg(long, env = "MUSIC_KEY_FILE", default_value = "music.key")]
-    key_file: PathBuf,
+    #[arg(long, env = "MUSIC_KEY_FILE")]
+    key_file: Option<PathBuf>,
+    #[arg(long = "audio-file", value_name = "PATH", action = clap::ArgAction::Append)]
+    audio_files: Vec<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let identity = identity(&args.key_file).await?;
-    eprintln!("Music Lab — experimental shared queue; audio playback is not connected.");
+    #[cfg(not(feature = "playback"))]
+    if !args.audio_files.is_empty() {
+        return Err("local audio requires building with --features playback".into());
+    }
+    #[cfg(feature = "playback")]
+    let library = if args.audio_files.is_empty() {
+        None
+    } else {
+        Some(discordia_music::activity::playback::Library::open(args.audio_files.clone()).await?)
+    };
+    let key_path = args.key_file.as_deref().unwrap_or_else(|| {
+        Path::new(if args.audio_files.is_empty() {
+            "music.key"
+        } else {
+            "music-local.key"
+        })
+    });
+    let identity = identity(key_path).await?;
+    eprintln!(
+        "Music Lab — experimental shared queue and optional operator-configured local audio."
+    );
     eprintln!(
         "Install this app key in Integrations → Install an app: {}",
         identity.pubkey()
     );
+    #[cfg(feature = "playback")]
+    if let Some(library) = library {
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let task = reconnect_audio(&args.server, &identity, library, receiver);
+        tokio::pin!(task);
+        return tokio::select! {
+            signal=tokio::signal::ctrl_c()=>{ signal?; stop.send_replace(true); task.await },
+            result=&mut task=>result,
+        };
+    }
     tokio::select! {
         signal = tokio::signal::ctrl_c() => { signal?; eprintln!("Music service stopped."); Ok(()) }
         result = reconnect(&args.server, &identity) => result,
+    }
+}
+
+#[cfg(feature = "playback")]
+async fn reconnect_audio(
+    server: &str,
+    identity: &BotIdentity,
+    library: discordia_music::activity::playback::Library,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    loop {
+        if *stop.borrow() {
+            return Ok(());
+        }
+        if let Err(error) =
+            runtime::connect_audio(server, identity, library.clone(), stop.clone()).await
+        {
+            if error.is::<discordia_music::activity::playback::CleanupFailure>() {
+                return Err(error);
+            }
+            eprintln!("Local audio service disconnected; its publications were stopped.");
+        }
+        if *stop.borrow() {
+            return Ok(());
+        }
+        tokio::select! { _=tokio::time::sleep(Duration::from_secs(5))=>{}, _=stop.changed()=>return Ok(()) }
     }
 }
 

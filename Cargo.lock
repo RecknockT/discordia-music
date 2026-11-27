@@ -1087,11 +1087,11 @@ dependencies = [
 [[package]]
 name = "discordia-agent"
 version = "0.1.0"
-source = "git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb#25ccc4054ae521493e3ee340fd1086436d9cadeb"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
 dependencies = [
  "chrono",
- "discordia-bot",
- "discordia-protocol",
+ "discordia-bot 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
+ "discordia-protocol 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
  "hex",
  "reqwest 0.12.28",
  "serde_json",
@@ -1107,8 +1107,28 @@ source = "git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee3
 dependencies = [
  "base64 0.22.1",
  "bs58",
- "discordia-nostr",
- "discordia-protocol",
+ "discordia-nostr 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb)",
+ "discordia-protocol 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb)",
+ "futures-util",
+ "hex",
+ "iroh",
+ "rand 0.8.6",
+ "secp256k1",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "url",
+]
+
+[[package]]
+name = "discordia-bot"
+version = "0.1.0"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
+dependencies = [
+ "base64 0.22.1",
+ "bs58",
+ "discordia-protocol 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
  "futures-util",
  "hex",
  "iroh",
@@ -1124,7 +1144,7 @@ dependencies = [
 [[package]]
 name = "discordia-image-policy"
 version = "0.1.0"
-source = "git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb#25ccc4054ae521493e3ee340fd1086436d9cadeb"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
 dependencies = [
  "image",
 ]
@@ -1134,7 +1154,7 @@ name = "discordia-music"
 version = "0.1.0"
 dependencies = [
  "clap",
- "discordia-bot",
+ "discordia-bot 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb)",
  "discordia-server",
  "futures-util",
  "hex",
@@ -1173,6 +1193,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "discordia-nostr"
+version = "0.1.0"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20 0.9.1",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand 0.8.6",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "zeroize",
+]
+
+[[package]]
 name = "discordia-protocol"
 version = "0.1.0"
 source = "git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb#25ccc4054ae521493e3ee340fd1086436d9cadeb"
@@ -1187,9 +1228,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "discordia-protocol"
+version = "0.1.0"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "discordia-server"
 version = "0.1.0"
-source = "git+https://github.com/ssotomayor/discordia?rev=25ccc4054ae521493e3ee340fd1086436d9cadeb#25ccc4054ae521493e3ee340fd1086436d9cadeb"
+source = "git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84#57c0c76e65f5fccdd7204dd327b444cff549ce84"
 dependencies = [
  "anyhow",
  "axum",
@@ -1198,10 +1253,10 @@ dependencies = [
  "chrono",
  "dashmap",
  "discordia-agent",
- "discordia-bot",
+ "discordia-bot 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
  "discordia-image-policy",
- "discordia-nostr",
- "discordia-protocol",
+ "discordia-nostr 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
+ "discordia-protocol 0.1.0 (git+https://github.com/ssotomayor/discordia?rev=57c0c76e65f5fccdd7204dd327b444cff549ce84)",
  "flate2",
  "futures-util",
  "hex",

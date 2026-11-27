@@ -16,6 +16,9 @@ pub struct PublicationKeys {
 }
 
 impl PublicationKeys {
+    pub fn material(&self) -> Option<(Id, &AudioKey)> {
+        self.publication.as_ref().map(|p| (p.id, &p.key))
+    }
     pub fn new(instance: ActivityInstance) -> Result<Self, &'static str> {
         if instance.participants.is_empty() {
             return Err("the music session has ended");

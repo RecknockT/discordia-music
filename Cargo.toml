@@ -15,6 +15,7 @@ activity = ["dep:discordia-bot", "dep:sha2", "dep:hex", "tokio/fs", "tokio/io-ut
 audio-keys = ["activity", "discordia-bot/audio-keys"]
 audio = ["dep:symphonia", "dep:rubato", "tokio/sync"]
 transport = ["audio", "dep:livekit"]
+playback = ["transport", "audio-keys", "dep:futures-util"]
 
 [[bin]]
 name = "discordia-music-activity"
@@ -39,10 +40,11 @@ hex = { version = "0.4", optional = true }
 symphonia = { version = "=0.6.1", default-features = false, features = ["mp3", "ogg", "vorbis", "wav", "pcm"], optional = true }
 rubato = { version = "=5.0.1", optional = true }
 livekit = { version = "=0.9.5", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["net", "io-util", "test-util"] }
-discordia-server = { git = "https://github.com/ssotomayor/discordia", rev = "25ccc4054ae521493e3ee340fd1086436d9cadeb", default-features = false }
+discordia-server = { git = "https://github.com/ssotomayor/discordia", rev = "57c0c76e65f5fccdd7204dd327b444cff549ce84", default-features = false, features = ["activity-audio"] }
 tempfile = "3"
 livekit-api = { version = "0.5", default-features = false, features = ["access-token"] }
 futures-util = "0.3"

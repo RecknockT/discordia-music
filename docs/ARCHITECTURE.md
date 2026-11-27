@@ -1,9 +1,8 @@
 # Music activity
 
-Current phase: installable shared-queue prototype, named **Music Lab**. Playback
-and collection expansion are not connected to the activity. An optional native
-audio engine and encrypted transport have been tested independently. Nothing
-starts with Discordia or the gateway by default.
+Current phase: installable **Music Lab**, with a shared metadata queue and
+opt-in local-file playback. Provider audio and collection expansion are pending.
+Nothing starts with Discordia or the gateway by default.
 
 ## Optional installation
 
@@ -11,11 +10,12 @@ starts with Discordia or the gateway by default.
 cargo run -p discordia-music --features activity --bin discordia-music-activity -- --server 'ws://127.0.0.1:9000'
 ```
 
-Off loopback, use the host's `quic://…` share string (or its TLS-proxied URL).
+Off loopback, use the host's `quic://â€¦` share string (or its TLS-proxied URL).
 The operator runs this process independently, like the Wizards example. It
 prints its public app key; a guild manager installs that key in
-**Integrations → Install an app**. No commands, guild intents or guild
-permissions are requested: only the activity's consented `Instance` capability.
+**Integrations â†’ Install an app**. No commands, guild intents or guild
+permissions are requested. Metadata mode requests `Instance`; local audio also
+requires explicitly approved `Audio` capability.
 The service supplies its signed, hash-pinned HTML bundle through `BundleWanted` /
 `OfferActivityBundle`; no public download URL or automatic install is needed.
 
@@ -104,7 +104,7 @@ oEmbed response grants neither audio access nor shared-listening rights.
 If source matching is introduced, show the actual provider/version; do not
 silently replace tracks. The current probe performs no cross-provider matching.
 
-## Evidence — 2026-11-26
+## Evidence â€” 2026-11-26
 
 Live metadata requests returned HTTP 200 and nonempty titles for YouTube
 `dQw4w9WgXcQ`, SoundCloud `forss/flickermood`, and Spotify
@@ -131,7 +131,7 @@ Primary references: [SoundCloud oEmbed](https://developers.soundcloud.com/docs/o
 |---|---|
 | `audio` | Symphonia decoder, stereo resampling, bounded producer queue, playback state and publication clock |
 | `transport` | Adds the existing native LiveKit SDK, a dedicated-room publisher and an independent E2EE key provider |
-| Default / `activity` alone | Neither audio feature is enabled; the installed bundle still says audio is not connected |
+| Default / `activity` alone | Neither audio feature is enabled; local playback is unavailable |
 
 `DecodedStream::file` reads a regular local file on a blocking worker. It does
 not resolve a provider URL or accept file paths from the installed activity.
@@ -147,14 +147,14 @@ Floating-point values must be finite; out-of-range peaks clamp to PCM full scale
 | Packet | At most 1 MiB encoded / 32,768 decoded frames; not a process-wide decoder memory guarantee |
 | Metadata | Tags capped at 16 KiB; embedded pictures disabled |
 | PCM queue | 50 frames / 500 ms, about 96 KiB of sample payload; full queue blocks the decoder |
-| Input | 8–192 kHz, one or two channels; format/rate changes fail |
+| Input | 8â€“192 kHz, one or two channels; format/rate changes fail |
 | Pause | Returns silence for the publication loop without advancing song position; decoder stops at its queue limit |
 | Replacement/stop | Closes the old receiver and waits for the worker; stale PCM cannot enter the replacement |
 | Publication clock | Advances through silence; short scheduling slips catch up, >250 ms reports `ClockStalled` rather than silently falling behind |
 | Publisher | 192 kbit/s Opus ceiling, no microphone AEC/noise suppression/AGC, no automatic subscriptions |
 
 The publisher takes an explicit music-room token and its own 32-byte key.
-Current activity commands do not invoke it. Owners must close the publisher
+The opt-in `playback` feature connects it to local-file activity controls. Owners must close the publisher
 and stop the decoder when their media session ends. Probe/queue capabilities
 are unchanged; no networking is exposed to the activity window.
 
@@ -194,9 +194,9 @@ The gateway/client changes and their server tests live in the separate
 [Discordia repository](https://github.com/ssotomayor/discordia). Run commands
 selecting `discordia-server` from that checkout.
 
-The gateway's `activity-audio` build feature is off by default. Music Lab's
-manifest still requests only `Instance`; it cannot obtain audio grants. The
-native receiver and key exchange are not connected to the activity yet.
+The gateway's `activity-audio` build feature is off by default. Metadata mode requests only `Instance`. Local-file mode uses a separate app
+identity and requests `Instance` plus `Audio`, with explicit approval. The
+trusted Discordia receiver handles grants and NIP-44 keys outside the page.
 
 | Boundary | Implemented behavior |
 |---|---|
@@ -222,8 +222,8 @@ unchanged snapshot preserves its publication; leaving and returning to the
 same participant list generates a new key and publication ID. Callers must
 close the previous publication before starting its replacement. Token expiry
 does not disconnect an existing SFU participant, and deterministic membership
-hashes alone do not revoke access. This teardown and the trusted native client
-receiver must be wired before enabling music audio.
+hashes alone do not revoke access. The local-file coordinator waits for confirmed publication cleanup before
+starting its replacement; a cleanup failure disables automatic reconnect.
 
 ```powershell
 cargo test -p discordia-nostr --test activity_audio
@@ -231,3 +231,27 @@ cargo test -p discordia-music --features audio-keys --test keys
 cargo test -p discordia-server --no-default-features --features activity-audio --test activity_audio
 cargo test -p discordia-server --no-default-features --test activity_audio_disabled
 ```
+
+
+## Local activity playback â€” validated 2026-11-27
+
+`playback` joins the decoder, native publisher, key delivery and activity runtime.
+It bounds four sessions, 16 operator-selected files, 16 queued controls and 128
+pending listener requests. Players share play/pause/next; spectators listen and
+set local volume. Metadata queue administration keeps its existing host policy.
+The page never supplies a path or receives media credentials/keys.
+
+Gateway-authorized listener admission forwards the correlated key request to the
+service, including for spectators without granting game-write access. Participant
+snapshots are processed in order, so leaving and returning to the same roster
+still rotates keys. Rekey preserves the decoder and current position after the
+old publisher closes. Service restart resets playback; unsafe cleanup prevents
+reconnect. Decoder workers are joined on termination.
+
+`tests/activity_media.rs` exercises a local gateway and real LiveKit 1.13.9 with
+two native receivers: spectator admission, nonhost player controls, pause silence,
+next file, revocation, position preservation on rekey, same-account second-device
+isolation, service restart and gateway disconnect cleanup. Generated stereo tones
+only. `MUSIC_TEST_SFU_BINARY` starts an owned loopback SFU and verifies shutdown;
+explicit URL/key/secret variables use an existing loopback test SFU instead.
+This does not verify the complete desktop WebView playback path or provider audio.

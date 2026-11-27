@@ -16,9 +16,18 @@ const MAX_SESSIONS: usize = 16;
 const MAX_PROBES: usize = 4;
 
 pub async fn connect(server: &str, identity: &BotIdentity) -> Result<()> {
+    let bot = registered(server, identity, &manifest()).await?;
+    run(bot, identity.pubkey()).await
+}
+
+async fn registered(
+    server: &str,
+    identity: &BotIdentity,
+    app: &discordia_bot::protocol::AppManifest,
+) -> Result<Bot> {
     let mut bot = tokio::time::timeout(
         Duration::from_secs(20),
-        Bot::connect(server, identity, "Music Lab"),
+        Bot::connect(server, identity, &app.name),
     )
     .await??;
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -33,11 +42,80 @@ pub async fn connect(server: &str, identity: &BotIdentity) -> Result<()> {
         }
     })
     .await??;
-    bot.register_manifest(identity, &manifest()).await?;
-    run(bot, identity.pubkey()).await
+    tokio::time::timeout(Duration::from_secs(5), bot.register_manifest(identity, app)).await??;
+    Ok(bot)
 }
 
 pub async fn run(mut bot: Bot, app_key: &str) -> Result<()> {
+    run_inner(
+        &mut bot,
+        app_key,
+        #[cfg(feature = "playback")]
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "playback")]
+pub async fn connect_audio(
+    server: &str,
+    identity: &BotIdentity,
+    library: super::playback::Library,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let app = super::audio_manifest();
+    let bot = tokio::select! {
+        result=registered(server,identity,&app)=>result?,
+        _=stop.changed()=>return Ok(()),
+    };
+    run_audio(bot, identity, library, stop).await
+}
+
+#[cfg(feature = "playback")]
+type AudioEvent = super::playback::Event;
+#[cfg(not(feature = "playback"))]
+type AudioEvent = ();
+
+async fn next_audio(
+    #[cfg(feature = "playback")] audio: Option<&mut super::playback::Playback<'_>>,
+) -> std::result::Result<AudioEvent, &'static str> {
+    #[cfg(feature = "playback")]
+    if let Some(audio) = audio {
+        return audio.next().await;
+    }
+    std::future::pending().await
+}
+
+#[cfg(feature = "playback")]
+pub async fn run_audio(
+    mut bot: Bot,
+    identity: &BotIdentity,
+    library: super::playback::Library,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let mut audio = super::playback::Playback::new(identity, library, stop);
+    let result = run_inner(&mut bot, identity.pubkey(), Some(&mut audio)).await;
+    audio.stop_all();
+    while let Some(message) = audio.pop() {
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(2), bot.send(&message)).await,
+            Ok(Ok(()))
+        ) {
+            break;
+        }
+    }
+    let closed = audio.close().await;
+    if closed.is_err() || audio.cleanup_failed() {
+        return Err(super::playback::CleanupFailure.into());
+    }
+    result
+}
+
+async fn run_inner(
+    bot: &mut Bot,
+    app_key: &str,
+    #[cfg(feature = "playback")] mut audio: Option<&mut super::playback::Playback<'_>>,
+) -> Result<()> {
     let probe = Arc::new(MetadataProbe::new()?);
     let mut sessions: HashMap<Id, Session> = HashMap::new();
     let mut jobs = JoinSet::new();
@@ -47,22 +125,36 @@ pub async fn run(mut bot: Bot, app_key: &str) -> Result<()> {
             event = bot.next_event() => match event {
                 None => return Ok(()),
                 Some(ServerMessage::ActivityInstances { channel_id, instances }) => {
+                    #[cfg(feature = "playback")]
+                    if let Some(audio)=audio.as_mut() { audio.sync(channel_id,&instances).await?; }
                     let changed = sync(&mut sessions, channel_id, instances, app_key);
-                    for id in changed { send_state(&mut bot, &sessions, id, None, None).await?; }
+                    for id in changed {
+                        send_state(bot, &sessions, id, None, None).await?;
+                        #[cfg(feature = "playback")]
+                        if let Some(audio)=audio.as_mut() { audio.snapshot(id,None,None); }
+                    }
                 }
                 Some(ServerMessage::ActivityEvent { instance_id, from, data }) => {
                     let Some(session) = sessions.get_mut(&instance_id) else {
-                        send_error(&mut bot, instance_id, &from, None, "This session is unavailable. Only one Music Lab session per channel and 16 per service are supported.").await?;
+                        send_error(bot, instance_id, &from, None, "This session is unavailable. Only one Music Lab session per channel and 16 per service are supported.").await?;
                         continue;
                     };
                     if data.len() > 4096 {
-                        send_error(&mut bot, instance_id, &from, None, "That music command is too large.").await?;
+                        send_error(bot, instance_id, &from, None, "That music command is too large.").await?;
                         continue;
+                    }
+                    #[cfg(feature = "playback")]
+                    if let Some(audio)=audio.as_mut() && audio.dispatch(&session.instance,&from,&data) {
+                            while let Some(message)=audio.pop() {
+                                if audio.stopping() {return Ok(());}
+                                tokio::time::timeout(Duration::from_secs(5),bot.send(&message)).await??;
+                            }
+                            continue;
                     }
                     let command = match serde_json::from_str::<Command>(&data) {
                         Ok(command) => command,
                         Err(_) => {
-                            send_error(&mut bot, instance_id, &from, None, "Invalid music command.").await?;
+                            send_error(bot, instance_id, &from, None, "Invalid music command.").await?;
                             continue;
                         }
                     };
@@ -75,15 +167,21 @@ pub async fn run(mut bot: Bot, app_key: &str) -> Result<()> {
                                 let handle = jobs.spawn(async move { (instance_id, entry_id, probe.inspect(source).await) });
                                 handles.insert((instance_id, entry_id), handle);
                             }
-                            send_state(&mut bot, &sessions, instance_id, hello.then_some(from.as_str()), Some(request_id)).await?;
+                            send_state(bot, &sessions, instance_id, hello.then_some(from.as_str()), Some(request_id)).await?;
+                            #[cfg(feature = "playback")]
+                            if hello && let Some(audio)=audio.as_mut() { audio.snapshot(instance_id,Some(&from),None); }
                         }
-                        Err(message) => send_error(&mut bot, instance_id, &from, Some(request_id), message).await?,
+                        Err(message) => send_error(bot, instance_id, &from, Some(request_id), message).await?,
                     }
                 }
                 Some(ServerMessage::BundleWanted { sha256 }) => {
                     if manifest().activity.is_some_and(|a| a.sha256 == sha256) {
                         bot.offer_bundle(BUNDLE.as_bytes()).await?;
                     }
+                }
+                #[cfg(feature = "playback")]
+                Some(message @ (ServerMessage::ActivityAudioToken {..} | ServerMessage::ActivityAudioError {..}))=>{
+                    if let Some(audio)=audio.as_mut() { audio.gateway(message).await?; }
                 }
                 Some(ServerMessage::Error { .. }) => eprintln!("The host rejected a music service request."),
                 Some(_) => {}
@@ -93,13 +191,32 @@ pub async fn run(mut bot: Bot, app_key: &str) -> Result<()> {
                     Some(Ok((instance_id, entry_id, report))) => {
                         handles.remove(&(instance_id, entry_id));
                         if sessions.get_mut(&instance_id).is_some_and(|s| s.complete(entry_id, report)) {
-                            send_state(&mut bot, &sessions, instance_id, None, None).await?;
+                            send_state(bot, &sessions, instance_id, None, None).await?;
                         }
                     }
                     Some(Err(error)) if error.is_cancelled() => {}
                     Some(Err(_)) => return Err("a music source worker failed".into()),
                     None => {}
                 }
+            }
+            event=next_audio(#[cfg(feature = "playback")] audio.as_deref_mut())=>{
+                #[cfg(feature = "playback")]
+                if let Some(audio)=audio.as_mut() {
+                    let event=event?;
+                    if matches!(event,super::playback::Event::Shutdown) { return Ok(()); }
+                    audio.apply(event).await?;
+                }
+                #[cfg(not(feature = "playback"))]
+                event?;
+            }
+        }
+        #[cfg(feature = "playback")]
+        if let Some(audio) = audio.as_mut() {
+            while let Some(message) = audio.pop() {
+                if audio.stopping() {
+                    return Ok(());
+                }
+                tokio::time::timeout(Duration::from_secs(5), bot.send(&message)).await??;
             }
         }
         handles.retain(|(instance, entry), handle| {
@@ -158,7 +275,11 @@ async fn send_state(
         if data.len() > MAX_ACTIVITY_DATA {
             return Err("music snapshot exceeds the activity frame limit".into());
         }
-        bot.activity_send(instance, to, &data).await?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            bot.activity_send(instance, to, &data),
+        )
+        .await??;
     }
     Ok(())
 }
@@ -170,11 +291,14 @@ async fn send_error(
     request_id: Option<Id>,
     message: &str,
 ) -> Result<()> {
-    bot.activity_send(
-        instance,
-        Some(to),
-        &json!({"t":"error", "request_id":request_id, "message":message}).to_string(),
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        bot.activity_send(
+            instance,
+            Some(to),
+            &json!({"t":"error", "request_id":request_id, "message":message}).to_string(),
+        ),
     )
-    .await?;
+    .await??;
     Ok(())
 }

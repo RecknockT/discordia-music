@@ -4,10 +4,9 @@ An optional, installable music activity with a separate Rust service for
 [Discordia](https://github.com/ssotomayor/discordia). Nothing runs or installs
 automatically in a Discordia community.
 
-**Experimental: shared queue and public metadata work; end-to-end music
-playback is not connected yet.** Native decoding, encrypted audio transport
-and scoped key envelopes are separate tested building blocks. Android/iOS
-activity windows are not supported yet.
+**Experimental:** shared metadata queue and opt-in local audio playback work.
+Provider audio and playlist expansion are not implemented. Android/iOS activity
+windows are not supported yet.
 
 ## Run and install
 
@@ -29,44 +28,72 @@ Keep `music.key` private and backed up: it identifies the installed application
 across restarts. `--key-file` / `MUSIC_KEY_FILE` selects another location.
 Never commit this file. Ctrl+C stops the service.
 
+## Local audio preview
+
+Requires a compatible Discordia client/host with the experimental
+`activity-audio` build feature and an operator-owned SFU. It is off by default.
+For an embedded desktop host, build Discordia with `--features activity-audio`.
+
+```powershell
+cargo run --locked --features playback --bin discordia-music-activity -- --server 'ws://127.0.0.1:9000' --audio-file 'C:\Music\first.wav' --audio-file 'C:\Music\second.mp3'
+```
+
+This mode uses a separate `music-local.key` identity by default. Install its
+printed app key and explicitly approve both Instance and Audio capabilities.
+Each participant presses Listen; all players may play, pause and advance.
+Spectators may listen and change their own volume. Queue administration remains
+host-only. No microphone is captured.
+
+The operator supplies 1–16 regular files, each at most 512 MiB. The activity page
+cannot choose file paths. These files form a local test sequence, separate from
+the public-link metadata queue. Playback and queue state are ephemeral; restarting
+the service resets them. Membership/role changes rotate the publication and key,
+while preserving the decoder position after confirmed cleanup. Cleanup failures
+stop automatic reconnect rather than risking duplicate publishers.
+
 ## Current capabilities
 
 | Area | Status |
 |---|---|
-| Queue | Shared, bounded, with player/host permissions and command deduplication |
+| Queue | Shared, bounded; player additions and host administration |
 | YouTube, Spotify, SoundCloud | Public link validation and track metadata lookup |
 | TIDAL | Link validation; no metadata adapter |
-| Playlist expansion / provider audio | Not implemented; recognizing a link does not grant audio or retransmission rights |
-| Local audio engine | Optional WAV/PCM, MP3 and Ogg/Vorbis decoding, stereo resampling and playback state |
-| Native transport | Optional isolated encrypted LiveKit publication; not invoked by activity commands yet |
-| Key delivery | Optional scoped NIP-44 envelopes and publication-key rotation; not wired to the activity yet |
-
-The signed manifest requests `Instance` only. Audio permission and the trusted
-receiver are being developed in Discordia; installing this prototype does not
-enable streaming or grant microphone access. No music account integration exists.
+| Playlist expansion / provider audio | Not implemented; recognizing a link does not authorize retransmission |
+| Local audio | Opt-in WAV/PCM, MP3, Ogg/Vorbis; shared play/pause/next |
+| Transport | Separate encrypted LiveKit music room and per-participant NIP-44 keys |
+| Default install | Metadata only, Instance permission; no audio permission |
 
 ## Development
 
-Discordia's SDK and native WebRTC patches are pinned to a Git revision, rather
-than sibling folders or an unpinned branch. The server dependency is used by
-integration tests. Native `transport` builds require the same C++ toolchain as
-Discordia. This service and its bundle live here; Discordia retains installation,
-permissions, the gateway and trusted client audio reception.
+SDK/native patches use pinned Discordia Git revisions. The integration-test
+server includes the authorized spectator key-request broker. This repository
+owns the service/bundle; Discordia owns installation, permissions and trusted
+client reception. No music accounts or provider playback integration exists.
 
-On Windows, keep the checkout/build path short for the native `transport`
-feature: legacy C++ tools can reject extracted SDK headers at 260 characters.
-Native Linux builds require LLVM 21, `libasound2-dev`, `libglib2.0-dev`,
-`libssl-dev` and `pkg-config`; the CI workflow installs and checks these.
+On Windows, keep the native checkout/build path short (legacy C++ path limits).
+Linux native builds need LLVM 21, `libasound2-dev`, `libglib2.0-dev`, `libssl-dev`
+and `pkg-config`; CI installs them.
 
 ```powershell
-$env:LIVEKIT_BUNDLE_SKIP='1'  # Tests do not launch the bundled SFU.
+$env:LIVEKIT_BUNDLE_SKIP='1'
 cargo fmt --all --check
 cargo test --locked --features activity,audio,audio-keys
-cargo clippy --locked --features activity,audio,audio-keys --all-targets -- -D warnings
+cargo clippy --locked --all-features --all-targets -- -D warnings
+cargo test --locked --all-features
 node --test tests/activity_ui.cjs
 ```
 
-Do not use `LIVEKIT_BUNDLE_SKIP` for a Discordia host that needs its bundled
-voice server. The ignored native media test requires an explicitly configured
-loopback test SFU and generated stereo tones; it does not use microphones or
-speakers. See [architecture and test details](docs/ARCHITECTURE.md).
+`LIVEKIT_BUNDLE_SKIP` is only for tests, not a host needing its bundled SFU.
+The ignored full local-activity test can launch an explicitly selected LiveKit
+1.13.9 binary on loopback and verifies its exit:
+
+```powershell
+$env:MUSIC_TEST_SFU_BINARY='C:\Tools\livekit-server.exe'
+cargo test --locked --all-features --test activity_media -- --ignored --test-threads=1
+```
+
+It generates tones, with no microphone/speaker or real account usage. A supplied
+loopback `MUSIC_TEST_SFU_URL` with `MUSIC_TEST_API_KEY` / `MUSIC_TEST_API_SECRET`
+uses that existing test SFU without stopping it. Two native SDK receivers are
+validated; full desktop GUI/WebView playback still needs manual verification.
+See [architecture and test details](docs/ARCHITECTURE.md).

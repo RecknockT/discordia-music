@@ -37,12 +37,19 @@
   <button id="add" type="submit" disabled>Add to queue</button>
 </form>
 <div id="error" role="alert"></div>
+<section id="audio-panel" hidden aria-label="Local audio test">
+  <p>Local audio configured by the operator. Links below still check metadata only.</p>
+  <p id="audio-status" role="status" aria-live="polite"></p>
+  <div class="toolbar"><button id="listen">Listen</button><button id="audio-play">Play</button><button id="audio-pause">Pause</button><button id="audio-next">Next</button></div>
+  <label>Volume <input id="audio-volume" type="range" min="0" max="100" value="70"></label>
+</section>
 <div class="toolbar"><button id="refresh" disabled>Refresh</button><button id="clear" disabled>Clear queue</button></div>
 <ol id="queue" aria-label="Shared music queue"></ol>
 <script>
   'use strict';
   const $ = id => document.getElementById(id);
   let info = null, state = null, pending = false, pendingId = null, alive = true, timer = null, requestNumber = 0;
+  let playback = null, listening = false, audioStatus = 'stopped', listenBusy = false;
   const me = () => info && info.me;
   const player = () => info && info.participants.some(p => p.pubkey === me() && p.role === 'player');
   const host = () => state && state.host === me() && player();
@@ -60,6 +67,20 @@
   }
 
   function render() {
+    $('notice').textContent = playback?.available
+      ? 'Local audio test. Listen to join; all players can control playback. Song links below check metadata only.'
+      : 'Experimental shared queue. Adding a song checks public metadata only; provider audio is not connected.';
+    $('audio-panel').hidden = !playback?.available;
+    $('listen').disabled = !alive || !playback?.available || listenBusy;
+    $('listen').textContent = listening ? 'Stop listening' : 'Listen';
+    $('audio-play').disabled = !alive || !player() || pending || !playback?.available;
+    $('audio-pause').disabled = !alive || !player() || pending || !playback?.available;
+    $('audio-next').disabled = !alive || !player() || pending || !playback?.available || playback.track + 1 >= playback.tracks;
+    const receiver = ({connecting:'Connecting…',playing:'Listening',waiting_for_audio:'Waiting for the publisher',reconnecting:'Reconnecting…',
+      stopped:'Not listening',service_stopped:'The publisher stopped',service_unavailable:'The service could not start audio',permission_denied:'Audio is not available or approved',
+      credentials_timeout:'Audio authorization timed out',playback_blocked:'Playback was blocked; stop listening and try again',
+      connection_failed:'Could not connect to music',connection_timeout:'Music connection timed out',encryption_failed:'Could not decrypt music',disconnected:'Music disconnected'})[audioStatus] || 'Not listening';
+    $('audio-status').textContent = `${receiver} · ${playback?.phase || 'stopped'} · Track ${(playback?.track || 0) + 1}/${playback?.tracks || 0}`;
     $('add').disabled = !alive || !player() || !state || pending || state.queue.length >= state.queue_limit;
     $('refresh').disabled = !alive || !player() || pending;
     $('clear').disabled = !alive || !host() || pending || !state.queue.length;
@@ -104,6 +125,28 @@
   $('add-form').onsubmit = event => { event.preventDefault(); send({t: 'add', url: $('url').value.trim()}); };
   $('clear').onclick = () => send({t: 'clear'});
   $('refresh').onclick = () => send({t: 'hello'});
+  $('listen').onclick = async () => {
+    if (!alive || !playback?.available || listenBusy) return;
+    listenBusy = true; render();
+    const joining = !listening;
+    listening = joining; audioStatus = joining ? 'connecting' : 'stopped'; render();
+    try { await discordia.call(joining ? 'instance.audio.join' : 'instance.audio.leave'); }
+    catch (_) { listening = false; audioStatus = 'connection_failed'; }
+    finally { listenBusy = false; render(); }
+  };
+  for (const [id, action] of [['audio-play','play'],['audio-pause','pause'],['audio-next','next']]) {
+    $(id).onclick = () => { if (player() && playback?.available) send({t:'playback',action}); };
+  }
+  $('audio-volume').oninput = () => {
+    const volume = Number($('audio-volume').value) / 100;
+    if (Number.isFinite(volume) && volume >= 0 && volume <= 1) discordia.call('instance.audio.volume',{volume}).catch(() => {});
+  };
+  discordia.on('instance.audio', data => {
+    if (typeof data?.status !== 'string') return;
+    audioStatus = data.status;
+    listening = ['connecting','playing','waiting_for_audio','reconnecting','playback_blocked'].includes(audioStatus);
+    render();
+  });
   discordia.on('instance.update', next => { info = next; render(); });
   discordia.on('instance.message', event => {
     if (!info || event.from !== info.app) return;
@@ -112,8 +155,16 @@
       if (state && data.session_epoch === state.session_epoch && data.revision < state.revision) return;
       const restarted = state && data.session_epoch !== state.session_epoch;
       state = data;
-      if (restarted) finish('The music service restarted this session. Check the queue before retrying a command.');
+      if (restarted) {
+        playback = null; listening = false; audioStatus = 'stopped';
+        discordia.call('instance.audio.leave').catch(() => {});
+        finish('The music service restarted this session. Check the queue before retrying a command.');
+      }
       else if (pendingId && data.ack === pendingId) finish(); else render();
+    } else if (data?.t === 'playback_state' && data.available === true && Number.isInteger(data.track) && Number.isInteger(data.tracks)
+      && data.track >= 0 && data.tracks >= 1 && data.tracks <= 16 && data.track < data.tracks) {
+      playback = data;
+      if (pendingId && data.ack === pendingId) finish(); else render();
     } else if (data?.t === 'error' && (!data.request_id || data.request_id === pendingId)) finish(typeof data.message === 'string' ? data.message : 'The music service rejected the command.');
   });
   discordia.call('instance.info').then(next => { info = next; render(); if (player()) send({t: 'hello'}); })

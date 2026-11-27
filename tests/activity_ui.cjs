@@ -29,7 +29,7 @@ async function boot(role = 'player') {
   const state = (extra = {}) => ({t: 'state', session_epoch: 'epoch-1', revision: 1, host: 'me', playback: 'not_connected', queue_limit: 8, queue: [], ...extra});
   if (role === 'player') message(state({ack: calls.at(-1).args.data.request_id}));
   else message(state());
-  return {get, calls, message, state, context, timers};
+  return {get, calls, message, state, context, timers, audio: status => handlers.get('instance.audio')({status})};
 }
 
 test('the queue trusts only its installed service and treats titles as text', async () => {
@@ -44,6 +44,43 @@ test('the queue trusts only its installed service and treats titles as text', as
   assert.equal(title.innerHTML, undefined);
   ui.message(ui.state({revision: 1}));
   assert.equal(ui.get('queue').children.length, 1);
+});
+
+test('all players control playback while spectators can listen and set their volume', async () => {
+  for (const role of ['player','spectator']) {
+    const ui = await boot(role);
+    ui.message(ui.state({host:'another-player',revision:2}));
+    ui.message({t:'playback_state',available:true,phase:'paused',track:0,tracks:2});
+    assert.equal(ui.get('audio-panel').hidden, false);
+    assert.equal(ui.get('audio-play').disabled, role === 'spectator');
+    await ui.get('listen').onclick();
+    assert.equal(ui.calls.at(-1).method, 'instance.audio.join');
+    ui.audio('playing'); assert.match(ui.get('audio-status').textContent, /Listening/);
+    ui.get('audio-volume').value = '25'; ui.get('audio-volume').oninput();
+    assert.equal(ui.calls.at(-1).method,'instance.audio.volume');
+    assert.equal(ui.calls.at(-1).args.volume,0.25);
+    const before = ui.calls.length;
+    ui.get('audio-play').onclick();
+    assert.equal(ui.calls.length, before + (role === 'player' ? 1 : 0));
+    if (role === 'player') assert.equal(ui.calls.at(-1).args.data.action,'play');
+    await ui.get('listen').onclick();
+    assert.equal(ui.calls.at(-1).method,'instance.audio.leave');
+  }
+});
+
+test('foreign playback state cannot expose audio controls or acknowledge a command', async () => {
+  const ui=await boot();
+  ui.message({t:'playback_state',available:true,phase:'playing',track:0,tracks:2},'another-participant');
+  assert.equal(ui.get('audio-panel').hidden,true);
+  ui.message({t:'playback_state',available:true,phase:'paused',track:0,tracks:2});
+  ui.get('audio-play').onclick();
+  const request=ui.calls.at(-1).args.data.request_id;
+  ui.message({t:'playback_state',available:true,phase:'playing',track:0,tracks:2,ack:'another-request'});
+  assert.equal(ui.get('audio-play').disabled,true);
+  ui.message({t:'playback_state',available:true,phase:'playing',track:0,tracks:2,ack:request});
+  assert.equal(ui.get('audio-play').disabled,false);
+  ui.audio('service_stopped');
+  assert.equal(ui.get('listen').textContent,'Listen');
 });
 
 test('unrelated metadata updates cannot acknowledge a pending command', async () => {
