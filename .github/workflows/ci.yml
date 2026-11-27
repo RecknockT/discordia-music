@@ -21,3 +21,30 @@ jobs:
       - run: cargo clippy --locked --features activity,audio,audio-keys --all-targets -- -D warnings
       - run: cargo test --locked --features activity,audio,audio-keys
       - run: node --test tests/activity_ui.cjs
+  native:
+    runs-on: ubuntu-latest
+    env:
+      LIVEKIT_BUNDLE_SKIP: "1"
+      CARGO_INCREMENTAL: "0"
+      CC: clang-21
+      CXX: clang++-21
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ssotomayor/discordia
+          ref: 25ccc4054ae521493e3ee340fd1086436d9cadeb
+          path: tooling/discordia
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native
+      - name: Native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev libssl-dev pkg-config
+          sudo bash tooling/discordia/scripts/install-webrtc-toolchain.sh
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
+      - run: cargo test --locked --all-features
