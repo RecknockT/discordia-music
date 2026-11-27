@@ -87,7 +87,12 @@ async fn phase(bot: &mut Bot, app: &str, desired: &str, track: usize) {
 }
 
 fn wave(path: &Path, frequency: f64) {
-    let frames = RATE * 12;
+    let frames = RATE
+        * if std::env::var_os("MUSIC_TEST_WEBVIEW_PROBE").is_some() {
+            120
+        } else {
+            12
+        };
     let mut bytes = Vec::with_capacity(frames as usize * 4 + 44);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(frames * 4 + 36).to_le_bytes());
@@ -188,6 +193,42 @@ impl Receiver {
         );
         let (url, token) = grant.unwrap();
         let (publication, key) = material.unwrap();
+        static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(binary) = std::env::var_os("MUSIC_TEST_WEBVIEW_PROBE")
+            && !PROBED.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            command(bot, instance, "play").await;
+            let mut probe = tokio::process::Command::new(binary)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn explicitly selected native WebView probe");
+            let options = json!({"url":url,"token":token,"keyHex":hex::encode(key),"publisher":format!("music-service:{}",instance.app),"request":request,"iceServers":[]});
+            use tokio::io::AsyncWriteExt;
+            let mut input = probe.stdin.take().unwrap();
+            input
+                .write_all(options.to_string().as_bytes())
+                .await
+                .unwrap();
+            input.shutdown().await.unwrap();
+            drop(input);
+            let output = tokio::time::timeout(Duration::from_secs(90), probe.wait_with_output())
+                .await
+                .expect("native WebView probe timed out")
+                .unwrap();
+            assert!(output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("MUSIC_WEBVIEW_PCM_VERIFIED"),
+                "native WebView did not confirm decoded PCM: {}",
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|s| s.starts_with("MUSIC_WEBVIEW_"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
         let connected = Room::connect(&url, token.as_str(), music_room_options(key, true)).await;
         assert!(connected.is_ok(), "test music room failed to connect");
         let (room, mut events) = connected.unwrap();

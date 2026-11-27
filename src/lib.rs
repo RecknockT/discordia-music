@@ -6,3 +6,6 @@ pub mod activity;
 
 #[cfg(feature = "audio")]
 pub mod audio;
+
+#[cfg(feature = "soundcloud")]
+pub mod soundcloud;

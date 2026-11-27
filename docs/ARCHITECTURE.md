@@ -10,10 +10,10 @@ Nothing starts with Discordia or the gateway by default.
 cargo run -p discordia-music --features activity --bin discordia-music-activity -- --server 'ws://127.0.0.1:9000'
 ```
 
-Off loopback, use the host's `quic://â€¦` share string (or its TLS-proxied URL).
+Off loopback, use the host's `quic://…` share string (or its TLS-proxied URL).
 The operator runs this process independently, like the Wizards example. It
 prints its public app key; a guild manager installs that key in
-**Integrations â†’ Install an app**. No commands, guild intents or guild
+**Integrations → Install an app**. No commands, guild intents or guild
 permissions are requested. Metadata mode requests `Instance`; local audio also
 requires explicitly approved `Audio` capability.
 The service supplies its signed, hash-pinned HTML bundle through `BundleWanted` /
@@ -104,7 +104,7 @@ oEmbed response grants neither audio access nor shared-listening rights.
 If source matching is introduced, show the actual provider/version; do not
 silently replace tracks. The current probe performs no cross-provider matching.
 
-## Evidence â€” 2026-11-26
+## Evidence — 2026-11-26
 
 Live metadata requests returned HTTP 200 and nonempty titles for YouTube
 `dQw4w9WgXcQ`, SoundCloud `forss/flickermood`, and Spotify
@@ -147,7 +147,7 @@ Floating-point values must be finite; out-of-range peaks clamp to PCM full scale
 | Packet | At most 1 MiB encoded / 32,768 decoded frames; not a process-wide decoder memory guarantee |
 | Metadata | Tags capped at 16 KiB; embedded pictures disabled |
 | PCM queue | 50 frames / 500 ms, about 96 KiB of sample payload; full queue blocks the decoder |
-| Input | 8â€“192 kHz, one or two channels; format/rate changes fail |
+| Input | 8–192 kHz, one or two channels; format/rate changes fail |
 | Pause | Returns silence for the publication loop without advancing song position; decoder stops at its queue limit |
 | Replacement/stop | Closes the old receiver and waits for the worker; stale PCM cannot enter the replacement |
 | Publication clock | Advances through silence; short scheduling slips catch up, >250 ms reports `ClockStalled` rather than silently falling behind |
@@ -233,7 +233,7 @@ cargo test -p discordia-server --no-default-features --test activity_audio_disab
 ```
 
 
-## Local activity playback â€” validated 2026-11-27
+## Local activity playback — validated 2026-11-27
 
 `playback` joins the decoder, native publisher, key delivery and activity runtime.
 It bounds four sessions, 16 operator-selected files, 16 queued controls and 128
@@ -255,3 +255,27 @@ isolation, service restart and gateway disconnect cleanup. Generated stereo tone
 only. `MUSIC_TEST_SFU_BINARY` starts an owned loopback SFU and verifies shutdown;
 explicit URL/key/secret variables use an existing loopback test SFU instead.
 This does not verify the complete desktop WebView playback path or provider audio.
+
+
+## Configured SoundCloud sources
+
+The `soundcloud` feature and `--soundcloud` flag enable a native Rust connector
+using operator-held API client credentials. Each listener remains account-free.
+Public track resolve/streams responses select only full playable MP3 HLS, with
+bounded HTTPS provider/CDN destinations, finite playlists, API token cache/refresh
+and shared rate-limit cooldown. Preparation bounds are listed in README.
+
+Players select existing queue entries; the service rechecks requester membership,
+queue presence and instance epoch on completion. Pending preparation cancels when
+its entry/access disappears. Successful playback advances through subsequent
+SoundCloud tracks; unsupported platforms are not substituted. Song replacement
+keeps the publication; source revisions reject late end/progress events, and
+prepared-file ownership survives decoder shutdown/rekey. Positions report at most
+every five seconds while unchanged phases avoid gateway write churn.
+
+Tests cover playlist/destination bounds, pending-entry removal, selection controls
+and source replacement without key/room churn. API login and real provider audio
+are not yet validated because operator app credentials are unavailable. No claim
+of complete SoundCloud compatibility or playlist imports is made.
+
+Protocol references: [SoundCloud API guide](https://developers.soundcloud.com/docs/api/guide), [official OpenAPI schema](https://developers.soundcloud.com/docs/api/explorer/api.json).

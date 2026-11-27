@@ -5,7 +5,9 @@ An optional, installable music activity with a separate Rust service for
 automatically in a Discordia community.
 
 **Experimental:** shared metadata queue and opt-in local audio playback work.
-Provider audio and playlist expansion are not implemented. Android/iOS activity
+SoundCloud playback has an experimental opt-in API connector; it still needs
+live validation with operator credentials. Other provider audio and playlist
+expansion are not implemented. Android/iOS activity
 windows are not supported yet.
 
 ## Run and install
@@ -51,12 +53,40 @@ the service resets them. Membership/role changes rotate the publication and key,
 while preserving the decoder position after confirmed cleanup. Cleanup failures
 stop automatic reconnect rather than risking duplicate publishers.
 
+## SoundCloud connector (experimental)
+
+The service, not each listener, needs a registered SoundCloud application.
+Set `SOUNDCLOUD_CLIENT_ID` and `SOUNDCLOUD_CLIENT_SECRET` in its private environment;
+never put credentials in the activity bundle or chat. Then run:
+
+```powershell
+cargo run --locked --features soundcloud --bin discordia-music-activity -- --server 'ws://127.0.0.1:9000' --soundcloud
+```
+
+Install the printed Audio app key as above. Players add a public SoundCloud
+track to the queue and press its Play button; listeners press Listen. Players
+share pause/resume/next. At song end, the service selects the next SoundCloud
+track in queue order. Other providers remain metadata-only and are never
+silently substituted. Albums, playlists, private tracks, previews and live audio
+are not supported in this connector.
+
+The adapter caches/refreshes API tokens, follows bounded provider-only HTTPS
+redirects and finite MP3 HLS playlists, and backs off on rate limits. Preparation
+is limited to two jobs (one per session), 120 seconds, 30-minute tracks, 512
+segments and 128 MiB per prepared track. It finishes preparation before changing
+the song; song changes preserve the audio publication and listener keys.
+Membership changes still rotate keys. Removing a pending track or losing access
+cancels its preparation. Prepared files are temporary and kept alive through
+native decoder teardown. A real SoundCloud track has **not been validated** yet:
+there are no registered app credentials in the test environment.
+
 ## Current capabilities
 
 | Area | Status |
 |---|---|
 | Queue | Shared, bounded; player additions and host administration |
-| YouTube, Spotify, SoundCloud | Public link validation and track metadata lookup |
+| YouTube, Spotify | Public link validation and track metadata lookup |
+| SoundCloud | Metadata; experimental configured API playback, live validation pending |
 | TIDAL | Link validation; no metadata adapter |
 | Playlist expansion / provider audio | Not implemented; recognizing a link does not authorize retransmission |
 | Local audio | Opt-in WAV/PCM, MP3, Ogg/Vorbis; shared play/pause/next |
@@ -94,6 +124,10 @@ cargo test --locked --all-features --test activity_media -- --ignored --test-thr
 
 It generates tones, with no microphone/speaker or real account usage. A supplied
 loopback `MUSIC_TEST_SFU_URL` with `MUSIC_TEST_API_KEY` / `MUSIC_TEST_API_SECRET`
-uses that existing test SFU without stopping it. Two native SDK receivers are
-validated; full desktop GUI/WebView playback still needs manual verification.
+uses that existing test SFU without stopping it. Two native SDK receivers are validated. On Windows, build Discordia's
+`activity_audio_probe` example and set `MUSIC_TEST_WEBVIEW_PROBE` to that binary
+for an additional real WebView2 PCM/decryption/cleanup check. It uses the same
+local-origin configuration as the app, muted generated tones and private stdin
+credentials. This validates the receiver window, not the complete activity
+installation/consent workflow in the desktop GUI.
 See [architecture and test details](docs/ARCHITECTURE.md).

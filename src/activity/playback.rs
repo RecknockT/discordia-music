@@ -41,9 +41,53 @@ impl std::fmt::Display for CleanupFailure {
 impl std::error::Error for CleanupFailure {}
 
 #[derive(Clone)]
-pub struct Library(Arc<Vec<PathBuf>>);
+pub struct Library {
+    files: Arc<Vec<PathBuf>>,
+    #[cfg(feature = "soundcloud")]
+    _prepared: Option<Arc<tempfile::TempDir>>,
+    #[cfg(feature = "soundcloud")]
+    title: Option<Arc<str>>,
+}
+impl std::ops::Deref for Library {
+    type Target = [PathBuf];
+    fn deref(&self) -> &Self::Target {
+        &self.files
+    }
+}
 
 impl Library {
+    fn paths(files: Vec<PathBuf>) -> Self {
+        Self {
+            files: Arc::new(files),
+            #[cfg(feature = "soundcloud")]
+            _prepared: None,
+            #[cfg(feature = "soundcloud")]
+            title: None,
+        }
+    }
+    #[cfg(feature = "soundcloud")]
+    pub fn empty() -> Self {
+        Self::paths(vec![])
+    }
+    #[cfg(feature = "soundcloud")]
+    pub fn prepared(track: crate::soundcloud::Prepared) -> Self {
+        Self {
+            files: Arc::new(vec![track.path]),
+            _prepared: Some(track.directory),
+            title: Some(track.title.into()),
+        }
+    }
+
+    fn title(&self) -> Option<&str> {
+        #[cfg(feature = "soundcloud")]
+        {
+            self.title.as_deref()
+        }
+        #[cfg(not(feature = "soundcloud"))]
+        {
+            None
+        }
+    }
     pub async fn open(files: Vec<PathBuf>) -> Result<Self, &'static str> {
         if files.is_empty() || files.len() > 16 {
             return Err("configure between one and 16 local audio files");
@@ -56,7 +100,7 @@ impl Library {
                 return Err("configured audio must be a nonempty regular file of at most 512 MiB");
             }
         }
-        Ok(Self(Arc::new(files)))
+        Ok(Self::paths(files))
     }
 }
 
@@ -76,6 +120,12 @@ struct Command {
     action: Control,
 }
 
+enum WorkerCommand {
+    Control(Control),
+    #[cfg(feature = "soundcloud")]
+    Replace(Library, Id),
+}
+
 struct PendingKey {
     from: String,
     request: Id,
@@ -87,11 +137,12 @@ struct RoomState {
     keys: Option<PublicationKeys>,
     grant: Option<(Id, Instant)>,
     generation: Id,
+    source_revision: Id,
     worker: bool,
     stopping: bool,
     live: bool,
     cancel: Option<watch::Sender<bool>>,
-    controls: Option<mpsc::Sender<Control>>,
+    controls: Option<mpsc::Sender<WorkerCommand>>,
     waiting: Vec<PendingKey>,
     recent: VecDeque<(String, Id)>,
     phase: &'static str,
@@ -99,9 +150,12 @@ struct RoomState {
     playing: bool,
     position: u64,
     resume: Option<Box<Resume>>,
+    library: Library,
 }
 
 pub struct Resume {
+    _library: Library,
+    source_revision: Id,
     player: Player,
     index: usize,
 }
@@ -110,6 +164,7 @@ pub enum Event {
     State {
         instance: Id,
         generation: Id,
+        source_revision: Id,
         phase: &'static str,
         index: usize,
         position: u64,
@@ -125,11 +180,12 @@ struct WorkerConfig {
     url: String,
     token: String,
     key: [u8; 32],
-    files: Arc<Vec<PathBuf>>,
+    files: Library,
     index: usize,
     playing: bool,
     instance: Id,
     generation: Id,
+    source_revision: Id,
     resume: Option<Box<Resume>>,
 }
 
@@ -144,6 +200,8 @@ pub struct Playback<'a> {
     outbox: VecDeque<ClientMessage>,
     timer: tokio::time::Interval,
     unsafe_cleanup: bool,
+    #[cfg(feature = "soundcloud")]
+    pub(crate) soundcloud: Option<Arc<crate::soundcloud::SoundCloud>>,
 }
 
 impl<'a> Playback<'a> {
@@ -166,7 +224,54 @@ impl<'a> Playback<'a> {
             outbox: VecDeque::new(),
             timer,
             unsafe_cleanup: false,
+            #[cfg(feature = "soundcloud")]
+            soundcloud: None,
         }
+    }
+
+    #[cfg(feature = "soundcloud")]
+    pub async fn replace(
+        &mut self,
+        instance: &ActivityInstance,
+        library: Library,
+    ) -> Result<(), &'static str> {
+        if library.is_empty() {
+            return Err("empty prepared audio");
+        }
+        self.ensure(instance)?;
+        let state = self
+            .rooms
+            .get_mut(&instance.id)
+            .ok_or("music session unavailable")?;
+        if state.stopping {
+            return Err("audio is reconnecting; retry shortly");
+        }
+        let revision = Id::new_v4();
+        if let Some(controls) = &state.controls {
+            controls
+                .try_send(WorkerCommand::Replace(library.clone(), revision))
+                .map_err(|_| "audio controls are busy; retry shortly")?;
+        } else {
+            self.discard_resume(instance.id).await?;
+        }
+        let state = self
+            .rooms
+            .get_mut(&instance.id)
+            .ok_or("music session unavailable")?;
+        state.source_revision = revision;
+        state.library = library;
+        state.index = 0;
+        state.position = 0;
+        state.playing = true;
+        state.phase = "buffering";
+        Ok(())
+    }
+
+    #[cfg(feature = "soundcloud")]
+    pub fn ended(&self, id: Id) -> bool {
+        self.rooms
+            .get(&id)
+            .is_some_and(|s| s.phase == "ended" && !s.stopping)
     }
 
     pub fn pop(&mut self) -> Option<ClientMessage> {
@@ -189,14 +294,22 @@ impl<'a> Playback<'a> {
         });
     }
 
+    fn sources(&self) -> Vec<&'static str> {
+        #[cfg(feature = "soundcloud")]
+        if self.soundcloud.is_some() {
+            return vec!["soundcloud"];
+        }
+        vec![]
+    }
+
     pub fn snapshot(&mut self, instance: Id, to: Option<&str>, ack: Option<Id>) {
         let state = self.rooms.get(&instance);
         self.send(
             instance,
             to,
-            json!({"t":"playback_state", "available":true, "ack":ack,
-            "phase":state.map_or("stopped",|s| s.phase), "track":state.map_or(0,|s|s.index),
-            "tracks":self.library.0.len(), "position_secs":state.map_or(0,|s|s.position), "publication":state.map(|s|s.generation)}),
+            json!({"t":"playback_state", "sources": self.sources(), "available":true, "ack":ack,
+            "title":state.and_then(|s|s.library.title()), "phase":state.map_or("stopped",|s| s.phase), "track":state.map_or(0,|s|s.index),
+            "tracks":state.map_or(self.library.len(),|s|s.library.len()), "position_secs":state.map_or(0,|s|s.position), "publication":state.map(|s|s.generation)}),
         );
     }
 
@@ -231,6 +344,7 @@ impl<'a> Playback<'a> {
                     keys: None,
                     grant: None,
                     generation: Id::nil(),
+                    source_revision: Id::new_v4(),
                     worker: false,
                     stopping: false,
                     live: true,
@@ -243,6 +357,7 @@ impl<'a> Playback<'a> {
                     playing: false,
                     position: 0,
                     resume: None,
+                    library: self.library.clone(),
                 },
             );
         }
@@ -326,6 +441,27 @@ impl<'a> Playback<'a> {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return false;
         };
+        if self
+            .rooms
+            .get(&instance.id)
+            .map_or(self.library.is_empty(), |s| s.library.is_empty())
+            && (value.get("__dxaudio").is_some()
+                || value.get("t").and_then(Value::as_str) == Some("playback"))
+        {
+            if let Some(request) = value
+                .get("request_id")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok())
+            {
+                self.error(
+                    instance.id,
+                    from,
+                    request,
+                    "select a playable track from the queue first",
+                );
+            }
+            return true;
+        }
         if value.get("__dxaudio").is_some() {
             let request = value
                 .get("request_id")
@@ -405,7 +541,9 @@ impl<'a> Playback<'a> {
             .any(|(key, id)| key == from && *id == command.request_id)
         {
             if let Some(controls) = state.controls.as_ref().filter(|_| !state.stopping)
-                && controls.try_send(command.action).is_err()
+                && controls
+                    .try_send(WorkerCommand::Control(command.action))
+                    .is_err()
             {
                 self.error(
                     instance.id,
@@ -419,7 +557,7 @@ impl<'a> Playback<'a> {
                 Control::Play => state.playing = true,
                 Control::Pause => state.playing = false,
                 Control::Next if state.controls.is_none() || state.stopping => {
-                    state.index = (state.index + 1).min(self.library.0.len() - 1)
+                    state.index = (state.index + 1).min(state.library.len().saturating_sub(1))
                 }
                 Control::Next => {}
             }
@@ -504,13 +642,14 @@ impl<'a> Playback<'a> {
                     return Ok(());
                 };
                 let key = *key.as_bytes();
-                let files = Arc::clone(&self.library.0);
+                let files = state.library.clone();
                 let reporter = self.reporter.clone();
                 let (cancel, stop) = watch::channel(false);
                 let (controls, commands) = mpsc::channel(16);
                 let index = state.index;
                 let playing = state.playing;
                 let resume = state.resume.take();
+                let source_revision = state.source_revision;
                 state.cancel = Some(cancel);
                 state.controls = Some(controls);
                 state.worker = true;
@@ -526,6 +665,7 @@ impl<'a> Playback<'a> {
                             playing,
                             instance: instance_id,
                             generation,
+                            source_revision,
                             resume,
                         },
                         stop,
@@ -599,15 +739,16 @@ impl<'a> Playback<'a> {
             Event::State {
                 instance,
                 generation,
+                source_revision,
                 phase,
                 index,
                 position,
             } => {
-                if let Some(s) = self
-                    .rooms
-                    .get_mut(&instance)
-                    .filter(|s| s.generation == generation && !s.stopping)
-                {
+                if let Some(s) = self.rooms.get_mut(&instance).filter(|s| {
+                    s.generation == generation
+                        && s.source_revision == source_revision
+                        && !s.stopping
+                }) {
                     s.phase = phase;
                     s.index = index;
                     s.position = position;
@@ -638,7 +779,7 @@ impl<'a> Playback<'a> {
                     return Err("an old music room could not be closed; refusing replacement");
                 }
                 let restarting = s.live && s.stopping && error.is_none();
-                if restarting {
+                if restarting && resume.source_revision == s.source_revision {
                     s.index = resume.index;
                     s.position = resume.player.position_frames() / u64::from(RATE);
                     if resume.player.phase() == Phase::Ended {
@@ -735,7 +876,7 @@ impl Drop for Playback<'_> {
 async fn worker(
     config: WorkerConfig,
     mut stop: watch::Receiver<bool>,
-    mut controls: mpsc::Receiver<Control>,
+    mut controls: mpsc::Receiver<WorkerCommand>,
     reporter: mpsc::Sender<Event>,
 ) -> (bool, Option<&'static str>, Box<Resume>) {
     let WorkerConfig {
@@ -747,14 +888,32 @@ async fn worker(
         playing,
         instance,
         generation,
+        source_revision,
         resume,
     } = config;
-    let (mut player, source_index) = match resume {
+    #[cfg(feature = "soundcloud")]
+    let mut source_revision = source_revision;
+    #[cfg(feature = "soundcloud")]
+    let mut files = files;
+    let (mut player, source_index, prior_library) = match resume {
         Some(resume) => {
-            let Resume { player, index } = *resume;
-            (player, index)
+            let Resume {
+                player,
+                index,
+                source_revision: previous,
+                _library,
+            } = *resume;
+            (
+                player,
+                if previous == source_revision {
+                    index
+                } else {
+                    usize::MAX
+                },
+                Some(_library),
+            )
         }
-        None => (Player::default(), index),
+        None => (Player::default(), index, None),
     };
     let mut publisher = match Publisher::connect(&url, &token, key).await {
         Ok(p) => p,
@@ -763,6 +922,8 @@ async fn worker(
                 false,
                 Some("could not close the music publisher"),
                 Box::new(Resume {
+                    source_revision,
+                    _library: files,
                     player,
                     index: source_index,
                 }),
@@ -773,6 +934,8 @@ async fn worker(
                 true,
                 Some("could not connect the music publisher"),
                 Box::new(Resume {
+                    source_revision,
+                    _library: files,
                     player,
                     index: source_index,
                 }),
@@ -783,18 +946,24 @@ async fn worker(
         if *stop.borrow() { return Ok(()); }
         if source_index!=index || matches!(player.phase(),Phase::Idle|Phase::Failed) {player.load(files[index].clone()).await.map_err(|_|"could not decode the configured local audio")?;}
         if playing { if player.phase()==Phase::Ended {player.load(files[index].clone()).await.map_err(|_|"could not restart local audio")?;} player.resume(); } else { player.pause(); }
-        let mut clock=Clock::default(); let mut last=None;
+        let mut clock=Clock::default(); let mut last=None; let mut last_report=Instant::now();
         loop {
             tokio::select! { biased;
                 _=stop.changed()=>return Ok(()),
                 command=controls.recv()=>match command {
                     None=>return Ok(()),
-                    Some(Control::Play)=>{
+                    Some(WorkerCommand::Control(Control::Play))=>{
                         if player.phase()==Phase::Ended { player.load(files[index].clone()).await.map_err(|_|"could not restart local audio")?; }
                         player.resume();
                     }
-                    Some(Control::Pause)=>player.pause(),
-                    Some(Control::Next)=>{
+                    Some(WorkerCommand::Control(Control::Pause))=>player.pause(),
+                    #[cfg(feature="soundcloud")]
+                    Some(WorkerCommand::Replace(replacement,revision))=>{
+                        player.load(replacement[0].clone()).await.map_err(|_|"could not decode the prepared SoundCloud audio")?;
+                        files=replacement;index=0;source_revision=revision;
+                        player.resume();last=None;
+                    }
+                    Some(WorkerCommand::Control(Control::Next))=>{
                         let paused=player.phase()==Phase::Paused;
                         if index+1<files.len() { index+=1; player.load(files[index].clone()).await.map_err(|_|"could not load the next local audio file")?; if paused { player.pause(); } }
                     }
@@ -808,13 +977,28 @@ async fn worker(
                     }
                     let phase=match player.phase() { Phase::Idle=>"stopped", Phase::Buffering=>"buffering",Phase::Playing=>"playing",Phase::Paused=>"paused",Phase::Ended=>"ended",Phase::Failed=>"failed" };
                     let snapshot=(phase,index,player.position_frames()/u64::from(RATE));
-                    if last!=Some(snapshot) && reporter.try_send(Event::State {instance,generation,phase,index,position:snapshot.2}).is_ok() { last=Some(snapshot); }
+                    // Progress shares the gateway write budget with keys and controls.
+                    let changed=last.is_none_or(|(previous,track,position)|previous!=phase || track!=index || snapshot.2>=position+5);
+                    if changed && (phase!="buffering" || last.is_none() || last_report.elapsed()>=Duration::from_secs(5))
+                        && reporter.try_send(Event::State {instance,generation,source_revision,phase,index,position:snapshot.2}).is_ok() {
+                        last=Some(snapshot);last_report=Instant::now();
+                    }
                 }
             }
         }
     }.await;
+    drop(prior_library);
     let closed = publisher.close().await.is_ok();
-    (closed, run.err(), Box::new(Resume { player, index }))
+    (
+        closed,
+        run.err(),
+        Box::new(Resume {
+            player,
+            index,
+            _library: files,
+            source_revision,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -838,13 +1022,58 @@ mod tests {
         }
     }
     fn library() -> Library {
-        Library(Arc::new(vec![
+        Library::paths(vec![
             PathBuf::from("operator-selected-one.wav"),
             PathBuf::from("operator-selected-two.wav"),
-        ]))
+        ])
     }
     fn key_request(instance: &ActivityInstance, request: Id) -> String {
         json!({"__dxaudio":"key_request","request_id":request,"epoch":activity_audio_epoch(instance)}).to_string()
+    }
+
+    #[cfg(feature = "soundcloud")]
+    #[tokio::test]
+    async fn changing_a_song_keeps_the_publication_and_listener_keys() {
+        let app = BotIdentity::generate();
+        let owner = BotIdentity::generate();
+        let current = instance(&app, &owner);
+        let (_stop, receiver) = watch::channel(false);
+        let mut audio = Playback::new(&app, library(), receiver);
+        audio.ensure(&current).unwrap();
+        let generation = audio.rooms[&current.id].generation;
+        let previous_revision = audio.rooms[&current.id].source_revision;
+        let (controls, mut commands) = mpsc::channel(16);
+        let state = audio.rooms.get_mut(&current.id).unwrap();
+        state.worker = true;
+        state.controls = Some(controls);
+        state.grant = None;
+        audio.outbox.clear();
+        audio
+            .replace(
+                &current,
+                Library::paths(vec![PathBuf::from("prepared.mp3")]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(audio.rooms[&current.id].generation, generation);
+        assert!(audio.rooms[&current.id].keys.is_some());
+        audio
+            .apply(Event::State {
+                instance: current.id,
+                generation,
+                source_revision: previous_revision,
+                phase: "ended",
+                index: 0,
+                position: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(audio.rooms[&current.id].phase, "buffering");
+        assert!(audio.outbox.is_empty());
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            WorkerCommand::Replace(_, _)
+        ));
     }
 
     #[tokio::test]
@@ -956,6 +1185,8 @@ mod tests {
                 true,
                 None,
                 Box::new(Resume {
+                    source_revision: Id::new_v4(),
+                    _library: library(),
                     player: Player::default(),
                     index: 0,
                 }),
@@ -981,6 +1212,7 @@ mod tests {
         assert!(!audio.rooms[&original.id].worker);
         audio
             .apply(Event::State {
+                source_revision: audio.rooms[&original.id].source_revision,
                 instance: original.id,
                 generation: old,
                 phase: "playing",
@@ -1033,6 +1265,8 @@ mod tests {
                     false,
                     None,
                     Box::new(Resume {
+                        source_revision: Id::new_v4(),
+                        _library: library(),
                         player: Player::default(),
                         index: 0
                     })

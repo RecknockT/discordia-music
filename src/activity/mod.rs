@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 pub const BUNDLE: &str = include_str!("../../assets/index.html");
 // Hosts reject changed bundle hashes unless the signed manifest version increases.
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 
 pub fn manifest() -> AppManifest {
     AppManifest {
@@ -37,9 +37,9 @@ pub fn manifest() -> AppManifest {
 #[cfg(feature = "playback")]
 pub fn audio_manifest() -> AppManifest {
     let mut app = manifest();
-    app.name = "Music Lab · Local audio".into();
+    app.name = "Music Lab · Audio".into();
     app.description =
-        "Experimental shared local audio. Provider links still check metadata only.".into();
+        "Experimental operator-configured audio; SoundCloud needs service API credentials.".into();
     if let Some(activity) = app.activity.as_mut() {
         activity.capabilities.push(ActivityCapability::Audio);
     }
@@ -64,3 +64,6 @@ mod tests {
         assert!(!BUNDLE.contains("<iframe"));
     }
 }
+
+#[cfg(feature = "soundcloud")]
+mod source_jobs;

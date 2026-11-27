@@ -136,3 +136,19 @@ test('an error for another command does not cancel this window\'s pending reques
   assert.equal(ui.get('refresh').disabled, false);
   assert.equal(ui.get('error').textContent, 'This request failed');
 });
+
+
+test('SoundCloud selection is offered only by a configured service and never to spectators', async () => {
+  for (const role of ['player','spectator']) {
+    const ui=await boot(role);
+    const entry={id:'sc-track',added_by:'me',source:{provider:'soundcloud',kind:'track',canonical_url:'https://soundcloud.com/test/song'},title:'Song'};
+    ui.message(ui.state({revision:2,queue:[entry]}));
+    const actions=()=>ui.get('queue').children[0].children[1].children;
+    assert.equal(actions().some(b=>b.textContent==='Play'),false);
+    ui.message({t:'playback_state',available:true,phase:'stopped',track:0,tracks:0,sources:['soundcloud']});
+    assert.equal(ui.get('listen').disabled,true);
+    const play=actions().find(b=>b.textContent==='Play');
+    assert.equal(!!play,role==='player');
+    if(play) {play.onclick();assert.equal(ui.calls.at(-1).args.data.entry_id,'sc-track');assert.equal(ui.calls.at(-1).args.data.t,'play_source');}
+  }
+});

@@ -88,12 +88,48 @@ async fn next_audio(
 
 #[cfg(feature = "playback")]
 pub async fn run_audio(
-    mut bot: Bot,
+    bot: Bot,
     identity: &BotIdentity,
     library: super::playback::Library,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    run_audio_inner(
+        bot,
+        identity,
+        library,
+        stop,
+        #[cfg(feature = "soundcloud")]
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "soundcloud")]
+pub async fn connect_soundcloud(
+    server: &str,
+    identity: &BotIdentity,
+    library: super::playback::Library,
+    source: Arc<crate::soundcloud::SoundCloud>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let manifest = super::audio_manifest();
+    let bot = tokio::select! { result=registered(server,identity,&manifest)=>result?, _=stop.changed()=>return Ok(()) };
+    run_audio_inner(bot, identity, library, stop, Some(source)).await
+}
+
+#[cfg(feature = "playback")]
+async fn run_audio_inner(
+    mut bot: Bot,
+    identity: &BotIdentity,
+    library: super::playback::Library,
+    stop: tokio::sync::watch::Receiver<bool>,
+    #[cfg(feature = "soundcloud")] source: Option<Arc<crate::soundcloud::SoundCloud>>,
+) -> Result<()> {
     let mut audio = super::playback::Playback::new(identity, library, stop);
+    #[cfg(feature = "soundcloud")]
+    {
+        audio.soundcloud = source;
+    }
     let result = run_inner(&mut bot, identity.pubkey(), Some(&mut audio)).await;
     audio.stop_all();
     while let Some(message) = audio.pop() {
@@ -111,6 +147,21 @@ pub async fn run_audio(
     result
 }
 
+async fn next_source(
+    #[cfg(feature = "soundcloud")] sources: &mut super::source_jobs::Sources,
+) -> SourceCompletion {
+    #[cfg(feature = "soundcloud")]
+    {
+        return sources.next().await;
+    }
+    #[cfg(not(feature = "soundcloud"))]
+    std::future::pending().await
+}
+#[cfg(feature = "soundcloud")]
+type SourceCompletion = super::source_jobs::Completion;
+#[cfg(not(feature = "soundcloud"))]
+type SourceCompletion = ();
+
 async fn run_inner(
     bot: &mut Bot,
     app_key: &str,
@@ -120,6 +171,8 @@ async fn run_inner(
     let mut sessions: HashMap<Id, Session> = HashMap::new();
     let mut jobs = JoinSet::new();
     let mut handles: HashMap<(Id, Id), AbortHandle> = HashMap::new();
+    #[cfg(feature = "soundcloud")]
+    let mut sources = super::source_jobs::Sources::default();
     loop {
         tokio::select! {
             event = bot.next_event() => match event {
@@ -143,6 +196,8 @@ async fn run_inner(
                         send_error(bot, instance_id, &from, None, "That music command is too large.").await?;
                         continue;
                     }
+                    #[cfg(feature="soundcloud")]
+                    if let Some(audio)=audio.as_mut() && sources.dispatch(session,&from,&data,audio,bot).await? {continue;}
                     #[cfg(feature = "playback")]
                     if let Some(audio)=audio.as_mut() && audio.dispatch(&session.instance,&from,&data) {
                             while let Some(message)=audio.pop() {
@@ -183,7 +238,7 @@ async fn run_inner(
                 Some(message @ (ServerMessage::ActivityAudioToken {..} | ServerMessage::ActivityAudioError {..}))=>{
                     if let Some(audio)=audio.as_mut() { audio.gateway(message).await?; }
                 }
-                Some(ServerMessage::Error { .. }) => eprintln!("The host rejected a music service request."),
+                Some(ServerMessage::Error { message }) => eprintln!("The host rejected a music service request ({}).",if message.starts_with("rate limited") {"rate limit"} else {"permission or session"}),
                 Some(_) => {}
             },
             completed = jobs.join_next(), if !jobs.is_empty() => {
@@ -198,6 +253,10 @@ async fn run_inner(
                     Some(Err(_)) => return Err("a music source worker failed".into()),
                     None => {}
                 }
+            }
+            _completion=next_source(#[cfg(feature="soundcloud")] &mut sources)=>{
+                #[cfg(feature="soundcloud")]
+                if let Some(audio)=audio.as_mut() {sources.complete(_completion,&sessions,audio,bot).await?;}
             }
             event=next_audio(#[cfg(feature = "playback")] audio.as_deref_mut())=>{
                 #[cfg(feature = "playback")]
@@ -217,6 +276,22 @@ async fn run_inner(
                     return Ok(());
                 }
                 tokio::time::timeout(Duration::from_secs(5), bot.send(&message)).await??;
+            }
+        }
+        #[cfg(feature = "soundcloud")]
+        {
+            for (id, from, request) in sources.retain(&sessions) {
+                send_error(
+                    bot,
+                    id,
+                    &from,
+                    Some(request),
+                    "Source preparation was canceled because the queue or access changed.",
+                )
+                .await?;
+            }
+            if let Some(audio) = audio.as_ref() {
+                sources.advance(&sessions, audio, bot).await?;
             }
         }
         handles.retain(|(instance, entry), handle| {

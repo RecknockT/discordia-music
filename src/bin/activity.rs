@@ -23,23 +23,44 @@ struct Args {
     key_file: Option<PathBuf>,
     #[arg(long = "audio-file", value_name = "PATH", action = clap::ArgAction::Append)]
     audio_files: Vec<PathBuf>,
+    #[arg(long)]
+    soundcloud: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    #[cfg(not(feature = "soundcloud"))]
+    if args.soundcloud {
+        return Err("SoundCloud requires building with --features soundcloud".into());
+    }
+    #[cfg(feature = "soundcloud")]
+    let source = if args.soundcloud {
+        Some(std::sync::Arc::new(
+            discordia_music::soundcloud::SoundCloud::configured()?,
+        ))
+    } else {
+        None
+    };
     #[cfg(not(feature = "playback"))]
     if !args.audio_files.is_empty() {
         return Err("local audio requires building with --features playback".into());
     }
     #[cfg(feature = "playback")]
     let library = if args.audio_files.is_empty() {
+        #[cfg(feature = "soundcloud")]
+        if args.soundcloud {
+            Some(discordia_music::activity::playback::Library::empty())
+        } else {
+            None
+        }
+        #[cfg(not(feature = "soundcloud"))]
         None
     } else {
         Some(discordia_music::activity::playback::Library::open(args.audio_files.clone()).await?)
     };
     let key_path = args.key_file.as_deref().unwrap_or_else(|| {
-        Path::new(if args.audio_files.is_empty() {
+        Path::new(if args.audio_files.is_empty() && !args.soundcloud {
             "music.key"
         } else {
             "music-local.key"
@@ -56,7 +77,14 @@ async fn main() -> Result<()> {
     #[cfg(feature = "playback")]
     if let Some(library) = library {
         let (stop, receiver) = tokio::sync::watch::channel(false);
-        let task = reconnect_audio(&args.server, &identity, library, receiver);
+        let task = reconnect_audio(
+            &args.server,
+            &identity,
+            library,
+            receiver,
+            #[cfg(feature = "soundcloud")]
+            source,
+        );
         tokio::pin!(task);
         return tokio::select! {
             signal=tokio::signal::ctrl_c()=>{ signal?; stop.send_replace(true); task.await },
@@ -75,14 +103,24 @@ async fn reconnect_audio(
     identity: &BotIdentity,
     library: discordia_music::activity::playback::Library,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    #[cfg(feature = "soundcloud")] source: Option<
+        std::sync::Arc<discordia_music::soundcloud::SoundCloud>,
+    >,
 ) -> Result<()> {
     loop {
         if *stop.borrow() {
             return Ok(());
         }
-        if let Err(error) =
+        #[cfg(feature = "soundcloud")]
+        let result = if let Some(source) = source.clone() {
+            runtime::connect_soundcloud(server, identity, library.clone(), source, stop.clone())
+                .await
+        } else {
             runtime::connect_audio(server, identity, library.clone(), stop.clone()).await
-        {
+        };
+        #[cfg(not(feature = "soundcloud"))]
+        let result = runtime::connect_audio(server, identity, library.clone(), stop.clone()).await;
+        if let Err(error) = result {
             if error.is::<discordia_music::activity::playback::CleanupFailure>() {
                 return Err(error);
             }

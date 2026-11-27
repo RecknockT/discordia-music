@@ -112,6 +112,23 @@ impl Session {
         }
     }
 
+    #[cfg(feature = "soundcloud")]
+    pub fn entry(&self, id: Id) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+    #[cfg(feature = "soundcloud")]
+    pub fn next_soundcloud(&self, id: Id) -> Option<Id> {
+        let index = self.entries.iter().position(|e| e.id == id)?;
+        self.entries
+            .iter()
+            .skip(index + 1)
+            .find(|e| {
+                e.source.provider() == crate::source::Provider::Soundcloud
+                    && e.source.kind() == Kind::Track
+            })
+            .map(|e| e.id)
+    }
+
     pub fn pending(&self, id: Id) -> bool {
         self.entries
             .iter()

@@ -38,7 +38,7 @@
 </form>
 <div id="error" role="alert"></div>
 <section id="audio-panel" hidden aria-label="Local audio test">
-  <p>Local audio configured by the operator. Links below still check metadata only.</p>
+  <p>Audio sources depend on the operator configuration. Only tracks with a Play button can be played from this queue.</p>
   <p id="audio-status" role="status" aria-live="polite"></p>
   <div class="toolbar"><button id="listen">Listen</button><button id="audio-play">Play</button><button id="audio-pause">Pause</button><button id="audio-next">Next</button></div>
   <label>Volume <input id="audio-volume" type="range" min="0" max="100" value="70"></label>
@@ -68,19 +68,19 @@
 
   function render() {
     $('notice').textContent = playback?.available
-      ? 'Local audio test. Listen to join; all players can control playback. Song links below check metadata only.'
+      ? (playback.sources?.includes('soundcloud') ? 'SoundCloud playback enabled. Select a song with Play, then Listen to join. All players share the controls.' : 'Local audio test. Listen to join; all players can control playback. Song links below check metadata only.')
       : 'Experimental shared queue. Adding a song checks public metadata only; provider audio is not connected.';
     $('audio-panel').hidden = !playback?.available;
-    $('listen').disabled = !alive || !playback?.available || listenBusy;
+    $('listen').disabled = !alive || !playback?.available || !playback.tracks || listenBusy;
     $('listen').textContent = listening ? 'Stop listening' : 'Listen';
-    $('audio-play').disabled = !alive || !player() || pending || !playback?.available;
-    $('audio-pause').disabled = !alive || !player() || pending || !playback?.available;
-    $('audio-next').disabled = !alive || !player() || pending || !playback?.available || playback.track + 1 >= playback.tracks;
+    $('audio-play').disabled = !alive || !player() || pending || !playback?.available || !playback.tracks;
+    $('audio-pause').disabled = !alive || !player() || pending || !playback?.available || !playback.tracks;
+    $('audio-next').disabled = !alive || !player() || pending || !playback?.available || (!playback.sources?.includes('soundcloud') && playback.track + 1 >= playback.tracks);
     const receiver = ({connecting:'Connecting…',playing:'Listening',waiting_for_audio:'Waiting for the publisher',reconnecting:'Reconnecting…',
       stopped:'Not listening',service_stopped:'The publisher stopped',service_unavailable:'The service could not start audio',permission_denied:'Audio is not available or approved',
       credentials_timeout:'Audio authorization timed out',playback_blocked:'Playback was blocked; stop listening and try again',
       connection_failed:'Could not connect to music',connection_timeout:'Music connection timed out',encryption_failed:'Could not decrypt music',disconnected:'Music disconnected'})[audioStatus] || 'Not listening';
-    $('audio-status').textContent = `${receiver} · ${playback?.phase || 'stopped'} · Track ${(playback?.track || 0) + 1}/${playback?.tracks || 0}`;
+    $('audio-status').textContent = `${receiver} · ${playback?.phase || 'stopped'} · ${typeof playback?.title === 'string' ? playback.title : `Track ${(playback?.track || 0) + 1}/${playback?.tracks || 0}`}`;
     $('add').disabled = !alive || !player() || !state || pending || state.queue.length >= state.queue_limit;
     $('refresh').disabled = !alive || !player() || pending;
     $('clear').disabled = !alive || !host() || pending || !state.queue.length;
@@ -98,6 +98,7 @@
         const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.disabled = pending || !alive;
         b.onclick = () => send(data); actions.append(b);
       };
+      if (player() && playback?.sources?.includes('soundcloud') && entry.source.provider === 'soundcloud' && entry.source.kind === 'track') button('Play', {t:'play_source',entry_id:entry.id});
       if (host() && index > 0) button('↑', {t: 'move', entry_id: entry.id, before: state.queue[index - 1].id});
       if (player() && (host() || entry.added_by === me())) button('Remove', {t: 'remove', entry_id: entry.id});
       row.append(actions); $('queue').append(row);
@@ -111,8 +112,8 @@
   async function send(data) {
     if (!alive || !player() || pending) return;
     const generation = ++requestNumber;
-    pending = true; $('error').textContent = ''; render();
-    timer = setTimeout(() => { if (generation === requestNumber) finish('The music service did not answer. Refresh to check the queue before retrying.'); }, 15000);
+    pending = true; $('error').textContent = data.t === 'play_source' ? 'Preparing the selected song…' : ''; render();
+    timer = setTimeout(() => { if (generation === requestNumber) finish('The music service did not answer. Refresh to check the queue before retrying.'); }, data.t === 'play_source' ? 150000 : 15000);
     try {
       pendingId = requestId();
       data = {...data, request_id: pendingId};
@@ -162,7 +163,7 @@
       }
       else if (pendingId && data.ack === pendingId) finish(); else render();
     } else if (data?.t === 'playback_state' && data.available === true && Number.isInteger(data.track) && Number.isInteger(data.tracks)
-      && data.track >= 0 && data.tracks >= 1 && data.tracks <= 16 && data.track < data.tracks) {
+      && data.track >= 0 && data.tracks >= 0 && data.tracks <= 16 && (data.tracks === 0 ? data.track === 0 : data.track < data.tracks)) {
       playback = data;
       if (pendingId && data.ack === pendingId) finish(); else render();
     } else if (data?.t === 'error' && (!data.request_id || data.request_id === pendingId)) finish(typeof data.message === 'string' ? data.message : 'The music service rejected the command.');
