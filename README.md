@@ -55,6 +55,8 @@ permissions, the gateway and trusted client audio reception.
 
 On Windows, keep the checkout/build path short for the native `transport`
 feature: legacy C++ tools can reject extracted SDK headers at 260 characters.
+Native Linux builds require LLVM 21, `libasound2-dev`, `libglib2.0-dev`,
+`libssl-dev` and `pkg-config`; the CI workflow installs and checks these.
 
 ```powershell
 $env:LIVEKIT_BUNDLE_SKIP='1'  # Tests do not launch the bundled SFU.
